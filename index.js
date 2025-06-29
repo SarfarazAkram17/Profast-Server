@@ -5,6 +5,7 @@ const cors = require("cors");
 const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
+const admin = require("firebase-admin");
 
 app.use(cors());
 app.use(express.json());
@@ -23,9 +24,54 @@ const client = new MongoClient(uri, {
   },
 });
 
+const decoded = Buffer.from(process.env.FIREBASE_ADMIN_KEY, "base64").toString(
+  "utf8"
+);
+const serviceAccount = JSON.parse(decoded);
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+// custom middleware
+const verifyFBToken = async (req, res, next) => {
+  const authHeader = req?.headers?.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.decoded = decoded;
+
+    next();
+  } catch (error) {
+    return res.status(403).send({ message: "Forbidden Access" });
+  }
+};
+
+const verifyTokenUid = (req, res, next) => {
+  const uidFromQuery = req?.query?.uid;
+  const uidFromToken = req?.decoded?.uid;
+
+  if (uidFromQuery !== uidFromToken) {
+    return res.status(403).send({ message: "Forbidden Access" });
+  }
+
+  next();
+};
+
 async function run() {
   try {
     await client.connect();
+
+    const usersCollection = client.db("Profast").collection("usersCollection");
 
     const parcelCollection = client
       .db("Profast")
@@ -35,11 +81,12 @@ async function run() {
       .db("Profast")
       .collection("paymentsCollection");
 
-    const trackingCollection = client
-      .db("Profast")
-      .collection("trackingCollection");
+    // const trackingCollection = client
+    //   .db("Profast")
+    //   .collection("trackingCollection");
 
-    app.post("/create-payment-intent", async (req, res) => {
+    // creating payment intent
+    app.post("/create-payment-intent", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const paymentIntent = await stripe.paymentIntents.create({
           amount: req.body.amountInCents,
@@ -52,7 +99,31 @@ async function run() {
       }
     });
 
-    app.get("/parcels", async (req, res) => {
+    // users api
+    app.post("/users", async (req, res) => {
+      const user = req.body;
+      const email = user.email;
+
+      const userExists = await usersCollection.findOne({ email });
+
+      if (userExists) {
+        const updateResult = await usersCollection.updateOne(
+          { email },
+          { $set: { last_log_in: new Date().toISOString() } }
+        );
+
+        return res.status(200).send({
+          message: "User already exists, last_log_in updated",
+          updated: updateResult.modifiedCount > 0,
+        });
+      }
+
+      const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
+
+    // parcels api
+    app.get("/parcels", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const email = req.query.email;
         const query = email ? { created_by: email } : {};
@@ -68,7 +139,7 @@ async function run() {
       }
     });
 
-    app.get("/parcels/:id", async (req, res) => {
+    app.get("/parcels/:id", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const { id } = req.params;
         const query = { _id: new ObjectId(id) };
@@ -80,7 +151,7 @@ async function run() {
       }
     });
 
-    app.post("/parcels", async (req, res) => {
+    app.post("/parcels", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const parcel = req.body;
 
@@ -91,7 +162,7 @@ async function run() {
       }
     });
 
-    app.delete("/parcels/:id", async (req, res) => {
+    app.delete("/parcels/:id", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const { id } = req.params;
         const query = { _id: new ObjectId(id) };
@@ -103,6 +174,7 @@ async function run() {
       }
     });
 
+    // tracking api
     app.post("/tracking", async (req, res) => {
       const {
         tracking_id,
@@ -125,12 +197,12 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/payments", async (req, res) => {
+    // payments api
+    app.get("/payments", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const email = req.query.email;
 
         const query = email ? { email } : {};
-        console.log(query);
 
         const options = { sort: { paid_at: -1 } };
 
@@ -143,7 +215,7 @@ async function run() {
       }
     });
 
-    app.post("/payments", async (req, res) => {
+    app.post("/payments", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const { parcelId, email, amount, paymentMethod, transactionId } =
           req.body;
