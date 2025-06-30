@@ -1,3 +1,4 @@
 node_modules
 .env
 Profast-FB-Admin-SDK.json
+.vercel

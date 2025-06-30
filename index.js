@@ -71,33 +71,32 @@ async function run() {
   try {
     await client.connect();
 
-    const usersCollection = client.db("Profast").collection("usersCollection");
+    const db = client.db("Profast");
 
-    const parcelCollection = client
-      .db("Profast")
-      .collection("parcelCollection");
-
-    const paymentsCollection = client
-      .db("Profast")
-      .collection("paymentsCollection");
-
-    // const trackingCollection = client
-    //   .db("Profast")
-    //   .collection("trackingCollection");
+    const usersCollection = db.collection("usersCollection");
+    const parcelCollection = db.collection("parcelCollection");
+    const paymentsCollection = db.collection("paymentsCollection");
+    const ridersCollection = db.collection("ridersCollection");
+    // const trackingCollection =  db.collection("trackingCollection");
 
     // creating payment intent
-    app.post("/create-payment-intent", verifyFBToken, verifyTokenUid, async (req, res) => {
-      try {
-        const paymentIntent = await stripe.paymentIntents.create({
-          amount: req.body.amountInCents,
-          currency: "bdt",
-          payment_method_types: ["card"],
-        });
-        res.json({ clientSecret: paymentIntent.client_secret });
-      } catch (error) {
-        res.status(500).json({ error: error.message });
+    app.post(
+      "/create-payment-intent",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        try {
+          const paymentIntent = await stripe.paymentIntents.create({
+            amount: req.body.amountInCents,
+            currency: "bdt",
+            payment_method_types: ["card"],
+          });
+          res.json({ clientSecret: paymentIntent.client_secret });
+        } catch (error) {
+          res.status(500).json({ error: error.message });
+        }
       }
-    });
+    );
 
     // users api
     app.post("/users", async (req, res) => {
@@ -162,17 +161,22 @@ async function run() {
       }
     });
 
-    app.delete("/parcels/:id", verifyFBToken, verifyTokenUid, async (req, res) => {
-      try {
-        const { id } = req.params;
-        const query = { _id: new ObjectId(id) };
+    app.delete(
+      "/parcels/:id",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        try {
+          const { id } = req.params;
+          const query = { _id: new ObjectId(id) };
 
-        const result = await parcelCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ error: "Failed to delete parcel" });
+          const result = await parcelCollection.deleteOne(query);
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ error: "Failed to delete parcel" });
+        }
       }
-    });
+    );
 
     // tracking api
     app.post("/tracking", async (req, res) => {
@@ -257,6 +261,71 @@ async function run() {
         res.status(500).send({ message: "Failed to record payment" });
       }
     });
+
+    // riders api
+    app.get(
+      "/riders/pending",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        try {
+          const pendingRiders = await ridersCollection
+            .find({ status: "pending" })
+            .toArray();
+
+          res.send(pendingRiders);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load pending riders" });
+        }
+      }
+    );
+
+    app.get(
+      "/riders/active",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        try {
+          const activeRiders = await ridersCollection
+            .find({ status: "active" })
+            .toArray();
+
+          res.send(activeRiders);
+        } catch (error) {
+          res.status(500).send({ message: "Failed to load active riders" });
+        }
+      }
+    );
+
+    app.post("/riders", verifyFBToken, verifyTokenUid, async (req, res) => {
+      const rider = req.body;
+
+      const result = await ridersCollection.insertOne(rider);
+      res.send(result);
+    });
+
+    app.patch(
+      "/riders/:id/status",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        const { id } = req.params;
+        const { status } = req.body;
+        const query = { _id: new ObjectId(id) };
+        const updatedDoc = {
+          $set: {
+            status,
+          },
+        };
+
+        try {
+          const result = await ridersCollection.updateOne(query, updatedDoc);
+          res.send(result);
+        } catch (err) {
+          res.status(500).send({ message: "Failed to update rider status" });
+        }
+      }
+    );
 
     await client.db("admin").command({ ping: 1 });
     console.log(
