@@ -33,40 +33,6 @@ admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-// custom middleware
-const verifyFBToken = async (req, res, next) => {
-  const authHeader = req?.headers?.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).send({ message: "Unauthorized access" });
-  }
-
-  const token = authHeader.split(" ")[1];
-  if (!token) {
-    return res.status(401).send({ message: "Unauthorized access" });
-  }
-
-  try {
-    const decoded = await admin.auth().verifyIdToken(token);
-    req.decoded = decoded;
-
-    next();
-  } catch (error) {
-    return res.status(403).send({ message: "Forbidden Access" });
-  }
-};
-
-const verifyTokenUid = (req, res, next) => {
-  const uidFromQuery = req?.query?.uid;
-  const uidFromToken = req?.decoded?.uid;
-
-  if (uidFromQuery !== uidFromToken) {
-    return res.status(403).send({ message: "Forbidden Access" });
-  }
-
-  next();
-};
-
 async function run() {
   try {
     await client.connect();
@@ -78,6 +44,52 @@ async function run() {
     const paymentsCollection = db.collection("paymentsCollection");
     const ridersCollection = db.collection("ridersCollection");
     // const trackingCollection =  db.collection("trackingCollection");
+
+    // custom middleware
+    const verifyFBToken = async (req, res, next) => {
+      const authHeader = req?.headers?.authorization;
+
+      if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+
+      const token = authHeader.split(" ")[1];
+      if (!token) {
+        return res.status(401).send({ message: "Unauthorized access" });
+      }
+
+      try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.decoded = decoded;
+
+        next();
+      } catch (error) {
+        return res.status(401).send({ message: "Unauthorized Access" });
+      }
+    };
+
+    const verifyTokenUid = (req, res, next) => {
+      const uidFromQuery = req?.query?.uid;
+      const uidFromToken = req?.decoded?.uid;
+
+      if (uidFromQuery !== uidFromToken) {
+        return res.status(403).send({ message: "Forbidden Access" });
+      }
+
+      next();
+    };
+
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.query.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+
+      next();
+    };
 
     // creating payment intent
     app.post(
@@ -99,6 +111,55 @@ async function run() {
     );
 
     // users api
+    app.get("/users/:email/role", async (req, res) => {
+      try {
+        const email = req.params.email;
+
+        if (!email) {
+          return res.status(400).send({ message: "Email is required" });
+        }
+
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        res.send({ role: user.role });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+    app.get(
+      "/users/search",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyAdmin,
+      async (req, res) => {
+        const emailQuery = req.query.email;
+        if (!emailQuery) {
+          return res.status(400).send({ message: "Missing email query" });
+        }
+
+        const regex = new RegExp(emailQuery, "i"); // case-insensitive partial match
+
+        try {
+          const users = await usersCollection
+            .find({
+              email: { $regex: regex },
+              role: { $in: ["admin", "user"] },
+            })
+            .limit(10)
+            .toArray();
+
+          res.send(users);
+        } catch (error) {
+          res.status(500).send({ message: error.message });
+        }
+      }
+    );
+
     app.post("/users", async (req, res) => {
       const user = req.body;
       const email = user.email;
@@ -120,6 +181,31 @@ async function run() {
       const result = await usersCollection.insertOne(user);
       res.send(result);
     });
+
+    app.patch(
+      "/users/:id/role",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        const { role } = req.body;
+
+        if (!["admin", "user"].includes(role)) {
+          return res.status(400).send({ message: "Invalid role" });
+        }
+
+        try {
+          const result = await usersCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { role } }
+          );
+          res.send({ message: `User role updated to ${role}`, result });
+        } catch (error) {
+          res.status(500).send({ message: error.message });
+        }
+      }
+    );
 
     // parcels api
     app.get("/parcels", verifyFBToken, verifyTokenUid, async (req, res) => {
@@ -267,6 +353,7 @@ async function run() {
       "/riders/pending",
       verifyFBToken,
       verifyTokenUid,
+      verifyAdmin,
       async (req, res) => {
         try {
           const pendingRiders = await ridersCollection
@@ -284,6 +371,7 @@ async function run() {
       "/riders/active",
       verifyFBToken,
       verifyTokenUid,
+      verifyAdmin,
       async (req, res) => {
         try {
           const activeRiders = await ridersCollection
@@ -308,9 +396,10 @@ async function run() {
       "/riders/:id/status",
       verifyFBToken,
       verifyTokenUid,
+      verifyAdmin,
       async (req, res) => {
         const { id } = req.params;
-        const { status } = req.body;
+        const { status, email } = req.body;
         const query = { _id: new ObjectId(id) };
         const updatedDoc = {
           $set: {
@@ -320,6 +409,19 @@ async function run() {
 
         try {
           const result = await ridersCollection.updateOne(query, updatedDoc);
+
+          if (status === "active") {
+            const userQuery = { email };
+            const updatedDoc = {
+              $set: {
+                role: "rider",
+              },
+            };
+            const updatedRoleResult = await usersCollection.updateOne(
+              userQuery,
+              updatedDoc
+            );
+          }
           res.send(result);
         } catch (err) {
           res.status(500).send({ message: "Failed to update rider status" });
