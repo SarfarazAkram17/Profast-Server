@@ -40,10 +40,10 @@ async function run() {
     const db = client.db("Profast");
 
     const usersCollection = db.collection("usersCollection");
-    const parcelCollection = db.collection("parcelCollection");
+    const parcelsCollection = db.collection("parcelsCollection");
     const paymentsCollection = db.collection("paymentsCollection");
     const ridersCollection = db.collection("ridersCollection");
-    // const trackingCollection =  db.collection("trackingCollection");
+    const trackingsCollection = db.collection("trackingsCollection");
 
     // custom middleware
     const verifyFBToken = async (req, res, next) => {
@@ -85,6 +85,18 @@ async function run() {
       const user = await usersCollection.findOne(query);
 
       if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+
+      next();
+    };
+
+    const verifyRider = async (req, res, next) => {
+      const email = req.query.email;
+      const query = { email };
+      const user = await usersCollection.findOne(query);
+
+      if (!user || user.role !== "rider") {
         return res.status(403).send({ message: "Forbidden access" });
       }
 
@@ -137,7 +149,7 @@ async function run() {
       verifyTokenUid,
       verifyAdmin,
       async (req, res) => {
-        const emailQuery = req.query.email;
+        const emailQuery = req.query.emailQuery;
         if (!emailQuery) {
           return res.status(400).send({ message: "Missing email query" });
         }
@@ -231,7 +243,7 @@ async function run() {
           },
         };
 
-        const parcels = await parcelCollection.find(query, options).toArray();
+        const parcels = await parcelsCollection.find(query, options).toArray();
         res.send(parcels);
       } catch (error) {
         console.error("Error fetching parcels:", error);
@@ -244,7 +256,7 @@ async function run() {
         const { id } = req.params;
         const query = { _id: new ObjectId(id) };
 
-        const result = await parcelCollection.findOne(query);
+        const result = await parcelsCollection.findOne(query);
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: "Failed to fetch parcel by ID" });
@@ -255,7 +267,7 @@ async function run() {
       try {
         const parcel = req.body;
 
-        const result = await parcelCollection.insertOne(parcel);
+        const result = await parcelsCollection.insertOne(parcel);
         res.send(result);
       } catch (error) {
         res.status(500).send({ error: "Failed to make parcel" });
@@ -269,17 +281,18 @@ async function run() {
       verifyAdmin,
       async (req, res) => {
         const parcelId = req.params.id;
-        const { riderId, riderName } = req.body;
+        const { riderId, riderName, riderEmail } = req.body;
 
         try {
           // Update parcel
-          await parcelCollection.updateOne(
+          await parcelsCollection.updateOne(
             { _id: new ObjectId(parcelId) },
             {
               $set: {
-                delivery_status: "in_transit",
+                delivery_status: "rider_assigned",
                 assigned_rider_id: riderId,
                 assigned_rider_name: riderName,
+                assigned_rider_email: riderEmail,
               },
             }
           );
@@ -301,6 +314,71 @@ async function run() {
       }
     );
 
+    app.patch(
+      "/parcels/:id/status",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyRider,
+      async (req, res) => {
+        const parcelId = req.params.id;
+        const { status } = req.body;
+        const updatedDoc = {
+          delivery_status: status,
+        };
+
+        if (status === "in_transit") {
+          updatedDoc.picked_at = new Date().toISOString();
+        } else if (status === "delivered") {
+          updatedDoc.delivered_at = new Date().toISOString();
+        }
+
+        try {
+          const result = await parcelsCollection.updateOne(
+            { _id: new ObjectId(parcelId) },
+            {
+              $set: updatedDoc,
+            }
+          );
+
+          if (status === "delivered") {
+            const parcel = await parcelsCollection.findOne({
+              _id: new ObjectId(parcelId),
+            });
+
+            const query = { _id: new ObjectId(parcel.assigned_rider_id) };
+            const updateRiderWorkStatus = await ridersCollection.updateOne(
+              query,
+              { $set: { work_status: "available" } }
+            );
+          }
+
+          res.send({result});
+        } catch (error) {
+          res.status(500).send({ message: error.message });
+        }
+      }
+    );
+
+    app.patch(
+      "/parcels/:id/cashout",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyRider,
+      async (req, res) => {
+        const id = req.params.id;
+        const result = await parcelsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              cashout_status: "cashed_out",
+              cashed_out_at: new Date().toISOString(),
+            },
+          }
+        );
+        res.send(result);
+      }
+    );
+
     app.delete(
       "/parcels/:id",
       verifyFBToken,
@@ -310,7 +388,7 @@ async function run() {
           const { id } = req.params;
           const query = { _id: new ObjectId(id) };
 
-          const result = await parcelCollection.deleteOne(query);
+          const result = await parcelsCollection.deleteOne(query);
           res.send(result);
         } catch (error) {
           res.status(500).send({ error: "Failed to delete parcel" });
@@ -319,26 +397,29 @@ async function run() {
     );
 
     // tracking api
-    app.post("/tracking", async (req, res) => {
-      const {
-        tracking_id,
-        parcel_id,
-        status,
-        message,
-        updated_by = "",
-      } = req.body;
+    app.get("/trackings/:trackingId", async (req, res) => {
+      const trackingId = req.params.trackingId;
 
-      const log = {
-        tracking_id,
-        parcel_id: parcel_id ? new ObjectId(parcel_id) : undefined,
-        status,
-        message,
-        time: new Date(),
-        updated_by,
-      };
+      const updates = await trackingsCollection
+        .find({ tracking_id: trackingId })
+        .sort({ timestamp: 1 }) // sort by time ascending
+        .toArray();
 
-      const result = await trackingCollection.insertOne(log);
-      res.send(result);
+      res.json(updates);
+    });
+
+    app.post("/trackings", async (req, res) => {
+      const update = req.body;
+
+      update.timestamp = new Date(); // ensure correct timestamp
+      if (!update.tracking_id || !update.status) {
+        return res
+          .status(400)
+          .json({ message: "tracking_id and status are required." });
+      }
+
+      const result = await trackingsCollection.insertOne(update);
+      res.status(201).json(result);
     });
 
     // payments api
@@ -365,7 +446,7 @@ async function run() {
           req.body;
 
         // 1. Update parcel's payment_status
-        const updateResult = await parcelCollection.updateOne(
+        const updateResult = await parcelsCollection.updateOne(
           { _id: new ObjectId(parcelId) },
           {
             $set: {
@@ -459,6 +540,73 @@ async function run() {
           res.send(riders);
         } catch (err) {
           res.status(500).send({ message: "Failed to load riders" });
+        }
+      }
+    );
+
+    app.get(
+      "/rider/parcels",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.query.email;
+
+          if (!email) {
+            return res.status(400).send({ message: "Rider email is required" });
+          }
+
+          const query = {
+            assigned_rider_email: email,
+            delivery_status: { $in: ["rider_assigned", "in_transit"] },
+          };
+
+          const options = {
+            sort: { creation_date: -1 }, // Newest first
+          };
+
+          const parcels = await parcelsCollection
+            .find(query, options)
+            .toArray();
+          res.send(parcels);
+        } catch (error) {
+          res.status(500).send({ message: error.message });
+        }
+      }
+    );
+
+    app.get(
+      "/rider/completed-parcels",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyRider,
+      async (req, res) => {
+        try {
+          const email = req.query.email;
+
+          if (!email) {
+            return res.status(400).send({ message: "Rider email is required" });
+          }
+
+          const query = {
+            assigned_rider_email: email,
+            delivery_status: {
+              $in: ["delivered", "wirehouse_delivered"],
+            },
+          };
+
+          const options = {
+            sort: { delivered_at: -1 }, // Latest first
+          };
+
+          const completedParcels = await parcelsCollection
+            .find(query, options)
+            .toArray();
+
+          res.send(completedParcels);
+        } catch (error) {
+          res.status(500).send({ message: error.message });
         }
       }
     );
