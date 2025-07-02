@@ -397,21 +397,21 @@ async function run() {
     );
 
     // tracking api
-    app.get("/trackings/:trackingId", async (req, res) => {
+    app.get("/trackings/:trackingId", verifyFBToken, verifyTokenUid, async (req, res) => {
       const trackingId = req.params.trackingId;
 
       const updates = await trackingsCollection
         .find({ tracking_id: trackingId })
-        .sort({ timestamp: 1 }) // sort by time ascending
+        .sort({ timestamp: 1 })
         .toArray();
 
       res.json(updates);
     });
 
-    app.post("/trackings", async (req, res) => {
+    app.post("/trackings", verifyFBToken, verifyTokenUid, async (req, res) => {
       const update = req.body;
 
-      update.timestamp = new Date(); // ensure correct timestamp
+      update.timestamp = new Date();
       if (!update.tracking_id || !update.status) {
         return res
           .status(400)
