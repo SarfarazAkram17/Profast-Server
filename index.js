@@ -263,6 +263,29 @@ async function run() {
       }
     });
 
+    app.get("/parcels/delivery/status-count", verifyFBToken, verifyTokenUid, verifyAdmin, async (req, res) => {
+      const pipeline = [
+        {
+          $group: {
+            _id: "$delivery_status",
+            count: {
+              $sum: 1,
+            },
+          },
+        },
+        {
+          $project: {
+            status: "$_id",
+            count: 1,
+            _id: 0,
+          },
+        },
+      ];
+
+      const result = await parcelsCollection.aggregate(pipeline).toArray();
+      res.send(result);
+    });
+
     app.post("/parcels", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
         const parcel = req.body;
@@ -352,7 +375,7 @@ async function run() {
             );
           }
 
-          res.send({result});
+          res.send({ result });
         } catch (error) {
           res.status(500).send({ message: error.message });
         }
@@ -397,16 +420,21 @@ async function run() {
     );
 
     // tracking api
-    app.get("/trackings/:trackingId", verifyFBToken, verifyTokenUid, async (req, res) => {
-      const trackingId = req.params.trackingId;
+    app.get(
+      "/trackings/:trackingId",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        const trackingId = req.params.trackingId;
 
-      const updates = await trackingsCollection
-        .find({ tracking_id: trackingId })
-        .sort({ timestamp: 1 })
-        .toArray();
+        const updates = await trackingsCollection
+          .find({ tracking_id: trackingId })
+          .sort({ timestamp: 1 })
+          .toArray();
 
-      res.json(updates);
-    });
+        res.json(updates);
+      }
+    );
 
     app.post("/trackings", verifyFBToken, verifyTokenUid, async (req, res) => {
       const update = req.body;
