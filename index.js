@@ -6,9 +6,11 @@ const port = process.env.PORT || 3000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
 const admin = require("firebase-admin");
+const { default: axios } = require("axios");
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded());
 
 app.get("/", (req, res) => {
   res.send("Profast server is cooking");
@@ -35,7 +37,7 @@ admin.initializeApp({
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("Profast");
 
@@ -102,6 +104,147 @@ async function run() {
 
       next();
     };
+
+    // create ssl payment
+    app.post(
+      "/create-ssl-payment",
+      verifyFBToken,
+      verifyTokenUid,
+      async (req, res) => {
+        const store_id = process.env.STORE_ID;
+        const store_passwd = process.env.STORE_PASSWORD;
+
+        const payment = req.body;
+
+        const tran_id = new ObjectId().toString();
+        payment.transactionId = tran_id;
+
+        const initiate = {
+          store_id,
+          store_passwd,
+          total_amount: payment.amount,
+          currency: "BDT",
+          tran_id,
+          success_url:
+            "https://profast-sarfaraz-akram.vercel.app/success-payment",
+          fail_url: "https://profast-sarfaraz-akram.vercel.app/fail-payment",
+          cancel_url:
+            "https://profast-sarfaraz-akram.vercel.app/cancel-payment",
+          ipn_url:
+            "https://profast-sarfaraz-akram.vercel.app/ipn-success-payment",
+          shipping_method: "Courier",
+          product_name: "Computer.",
+          product_category: "Electronic",
+          product_profile: "general",
+          cus_name: payment.name,
+          cus_email: payment.email,
+          cus_add1: "Dhaka",
+          cus_add2: "Dhaka",
+          cus_city: "Dhaka",
+          cus_state: "Dhaka",
+          cus_postcode: "1000",
+          cus_country: "Bangladesh",
+          cus_phone: "01711111111",
+          cus_fax: "01711111111",
+          ship_name: "Customer Name",
+          ship_add1: "Dhaka",
+          ship_add2: "Dhaka",
+          ship_city: "Dhaka",
+          ship_state: "Dhaka",
+          ship_postcode: 1000,
+          ship_country: "Bangladesh",
+        };
+
+        const iniRes = await axios({
+          url: "https://sandbox.sslcommerz.com/gwprocess/v4/api.php",
+          method: "POST",
+          data: initiate,
+          headers: {
+            "Content-type": "application/x-www-form-urlencoded",
+          },
+        });
+        const gatewayUrl = iniRes?.data?.GatewayPageURL;
+
+        await paymentsCollection.insertOne(payment);
+
+        res.status(201).send({
+          gatewayUrl,
+        });
+      }
+    );
+
+    app.post("/success-payment", async (req, res) => {
+      const paymentSuccess = req.body;
+      const query = {
+        transactionId: paymentSuccess.tran_id,
+      };
+      const payment = await paymentsCollection.findOne(query);
+
+      const store_id = process.env.STORE_ID;
+      const store_passwd = process.env.STORE_PASSWORD;
+
+      const isValidPayment = await axios.get(
+        `https://sandbox.sslcommerz.com/validator/api/validationserverAPI.php?val_id=${paymentSuccess.val_id}&store_id=${store_id}&store_passwd=${store_passwd}`
+      );
+
+      if (isValidPayment?.data?.status === "VALID") {
+        // update parcel payment status
+        const updatedParcel = {
+          $set: {
+            payment_status: "paid",
+          },
+        };
+        const updateParcel = await parcelsCollection.updateOne(
+          { _id: new ObjectId(payment.parcelId) },
+          updatedParcel
+        );
+
+        // update payments status
+        const updatedPayment = {
+          $set: {
+            status: "payment done",
+            paid_at_string: new Date().toISOString(),
+            paid_at: new Date(),
+          },
+        };
+        const updatePaymentStatus = await paymentsCollection.updateOne(
+          query,
+          updatedPayment
+        );
+        return res.redirect(
+          "https://profast-sarfaraz-akram.netlify.app/dashboard/myParcels"
+        );
+      } else {
+        const deletePayment = await paymentsCollection.deleteOne(query);
+        res.redirect(
+          "https://profast-sarfaraz-akram.netlify.app/dashboard/myParcels"
+        );
+        return res.send({ message: "Invalid payment" });
+      }
+    });
+
+    app.post("/fail-payment", async (req, res) => {
+      const failPayment = req.body;
+      const query = { transactionId: failPayment.tran_id };
+
+      await paymentsCollection.deleteOne(query);
+
+      return res.redirect(
+        "https://profast-sarfaraz-akram.netlify.app/dashboard/myParcels"
+      );
+    });
+
+    app.post("/cancel-payment", async (req, res) => {
+      const cancelPayment = req.body;
+      console.log(cancelPayment);
+      const query = { transactionId: cancelPayment.tran_id };
+
+      await paymentsCollection.deleteOne(query);
+
+      return res.redirect(
+        "https://profast-sarfaraz-akram.netlify.app/dashboard/myParcels"
+      );
+    });
 
     // creating payment intent
     app.post(
@@ -263,28 +406,34 @@ async function run() {
       }
     });
 
-    app.get("/parcels/delivery/status-count", verifyFBToken, verifyTokenUid, verifyAdmin, async (req, res) => {
-      const pipeline = [
-        {
-          $group: {
-            _id: "$delivery_status",
-            count: {
-              $sum: 1,
+    app.get(
+      "/parcels/delivery/status-count",
+      verifyFBToken,
+      verifyTokenUid,
+      verifyAdmin,
+      async (req, res) => {
+        const pipeline = [
+          {
+            $group: {
+              _id: "$delivery_status",
+              count: {
+                $sum: 1,
+              },
             },
           },
-        },
-        {
-          $project: {
-            status: "$_id",
-            count: 1,
-            _id: 0,
+          {
+            $project: {
+              status: "$_id",
+              count: 1,
+              _id: 0,
+            },
           },
-        },
-      ];
+        ];
 
-      const result = await parcelsCollection.aggregate(pipeline).toArray();
-      res.send(result);
-    });
+        const result = await parcelsCollection.aggregate(pipeline).toArray();
+        res.send(result);
+      }
+    );
 
     app.post("/parcels", verifyFBToken, verifyTokenUid, async (req, res) => {
       try {
@@ -685,7 +834,7 @@ async function run() {
       }
     );
 
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
