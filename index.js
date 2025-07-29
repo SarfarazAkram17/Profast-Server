@@ -37,7 +37,7 @@ admin.initializeApp({
 
 async function run() {
   try {
-    // await client.connect();
+    await client.connect();
 
     const db = client.db("Profast");
 
@@ -115,6 +115,7 @@ async function run() {
         const store_passwd = process.env.STORE_PASSWORD;
 
         const payment = req.body;
+        const parcel = await parcelsCollection.findOne({_id: new ObjectId(payment.parcelId)})
 
         const tran_id = new ObjectId().toString();
         payment.transactionId = tran_id;
@@ -122,7 +123,7 @@ async function run() {
         const initiate = {
           store_id,
           store_passwd,
-          total_amount: payment.amount,
+          total_amount: parseInt(parcel.cost),
           currency: "BDT",
           tran_id,
           success_url:
@@ -834,7 +835,7 @@ async function run() {
       }
     );
 
-    // await client.db("admin").command({ ping: 1 });
+    await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!"
     );
